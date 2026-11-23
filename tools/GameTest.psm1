@@ -541,9 +541,7 @@ function Invoke-EbcComparedScenario {
         catch { [Console]::Error.WriteLine("scenario '$Name' threw: $($_.Exception.Message)"); Stop-EbcGame; exit 1 }
         $wrote = $script:SeededState -or $script:RamWrites -gt 0
         ConvertTo-Json -InputObject ([PSCustomObject]@{ Observations = @($script:Observations); WroteRam = $wrote }) | Set-Content -LiteralPath $observeTo -Encoding utf8
-        [EightBallChampMachine]::Dbg("PS compare child '$Name': json written; Stop-EbcGame")
         Stop-EbcGame
-        [EightBallChampMachine]::Dbg("PS compare child '$Name': exit 0")
         exit 0
     }
 
@@ -571,19 +569,9 @@ function Invoke-EbcComparedScenario {
             $psi.Environment['EBC_PRIVATE_DIR'] = $childDir
             $psi.Environment['NO_COLOR'] = '1'
             $p = [Diagnostics.Process]::Start($psi)
-            $dbgClock = [Diagnostics.Stopwatch]::StartNew()
-            [EightBallChampMachine]::Dbg("PS compare parent: started child $($p.Id) for $t '$Name'")
             $outTask = $p.StandardOutput.ReadToEndAsync(); $errTask = $p.StandardError.ReadToEndAsync()
-            if ($env:EBC_DEBUG_CHILD_TIMEOUT) { $TimeoutSeconds = [int]$env:EBC_DEBUG_CHILD_TIMEOUT }
-            if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
-                if ($env:EBC_DEBUG_LOG) { [Console]::Out.WriteLine("DEBUG compare child $($p.Id) for $t '$Name' still running after $TimeoutSeconds s"); & (Join-Path $script:Repo 'tools/Debug-Dump.ps1') -ProcessId $p.Id | ForEach-Object { [Console]::Out.WriteLine("$_") } }
-                $p.Kill($true); throw "child for $t timed out after $TimeoutSeconds s"
-            }
-            [EightBallChampMachine]::Dbg("PS compare parent: child $($p.Id) exited after $($dbgClock.Elapsed.TotalSeconds) s")
+            if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { $p.Kill($true); throw "child for $t timed out after $TimeoutSeconds s" }
             $p.WaitForExit()
-            [void]$outTask.Wait(); [void]$errTask.Wait()
-            [EightBallChampMachine]::Dbg("PS compare parent: child $($p.Id) streams closed after $($dbgClock.Elapsed.TotalSeconds) s")
-            if ($env:EBC_DEBUG_LOG) { [Console]::Out.WriteLine(("DEBUG compare child {0} {1} '{2}' exit {3} in {4:N2} s" -f $p.Id, $t, $Name, $p.ExitCode, $dbgClock.Elapsed.TotalSeconds)) }
             $err = ($errTask.Result -split "`r?`n" | Where-Object { $_ } | Select-Object -Last 3) -join ' / '
             if ($p.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $json)) { throw "child for $t exited $($p.ExitCode) without observations: $err" }
             $obs = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json

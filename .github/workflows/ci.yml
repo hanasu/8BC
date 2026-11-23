@@ -18,6 +18,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
+    env:
+      LOOPS: '0'
     defaults:
       run:
         shell: pwsh
@@ -43,6 +45,7 @@ jobs:
         continue-on-error: true
         run: ./tools/Invoke-GameTests.ps1 -Path tests/kit/machine.tests.ps1
       - name: Loop compare file
+        if: env.LOOPS != '0'
         continue-on-error: true
         env:
           EBC_DEBUG_CHILD_TIMEOUT: '120'
@@ -50,6 +53,7 @@ jobs:
           $env:PATH = "$env:PATH$([IO.Path]::PathSeparator)$(Join-Path $HOME '.dotnet/tools')"
           ./tools/Debug-Loop.ps1 -File tests/compare/original-vs-deluxe.tests.ps1 -Iterations 5 -FileTimeout 600
       - name: Loop machine file
+        if: env.LOOPS != '0'
         continue-on-error: true
         run: |
           $env:PATH = "$env:PATH$([IO.Path]::PathSeparator)$(Join-Path $HOME '.dotnet/tools')"

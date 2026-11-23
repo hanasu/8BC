@@ -64,6 +64,7 @@ try {
         if ($ChildMode -eq 'ThrowWhilePaused') {
             Start-EbcGame -AttractFrames 0 -EmptyOuthole
             Step-EbcFrames -Frames 10
+            [EightBallChampMachine]::Dbg('PS ThrowWhilePaused: throwing')
             throw 'deliberate exception while the emulator is paused'
         }
         if ($ChildMode -eq 'HangGuard') {
@@ -157,7 +158,7 @@ try {
     finally {
         if ($ChildMode -eq 'ThrowWhilePaused') {
             # Only the machine's own stop, not Stop-EbcGame below, may have run yet.
-            if ('EightBallChampMachine' -as [type]) { Stop-EbcMachine }
+            if ('EightBallChampMachine' -as [type]) { [EightBallChampMachine]::Dbg('PS inner finally: Stop-EbcMachine'); Stop-EbcMachine; [EightBallChampMachine]::Dbg('PS inner finally: Stop-EbcMachine returned') }
         }
         elseif ($ChildMode -eq '') { Stop-EbcGame }
     }
@@ -168,7 +169,18 @@ try {
             $throwOut = Join-Path $work 'throw-child-state.txt'
             $proc = Start-Process -FilePath (Get-Process -Id $PID).Path -PassThru -NoNewWindow -RedirectStandardError (Join-Path $work 'throw-child.err') -RedirectStandardOutput (Join-Path $work 'throw-child.out') -ArgumentList @(
                 '-NoProfile', '-File', $PSCommandPath, '-Tree', $Tree, '-VpmZip', $VpmZip, '-ChildMode', 'ThrowWhilePaused', '-OutFile', $throwOut)
-            if (-not $proc.WaitForExit(60000)) { $proc.Kill(); throw 'child still running after 60 s' }
+            if (-not $proc.WaitForExit(60000)) {
+                if ($env:EBC_DEBUG_LOG) {
+                    & {
+                        "DEBUG throw child $($proc.Id) still running after 60 s"
+                        & (Join-Path $PSScriptRoot '../../tools/Debug-Dump.ps1') -ProcessId $proc.Id
+                        '--- throw-child.err'; Get-Content -LiteralPath (Join-Path $work 'throw-child.err') -ErrorAction SilentlyContinue
+                        '--- throw-child.out'; Get-Content -LiteralPath (Join-Path $work 'throw-child.out') -ErrorAction SilentlyContinue
+                    } | ForEach-Object { [Console]::Out.WriteLine("$_") }
+                }
+                $proc.Kill(); throw 'child still running after 60 s'
+            }
+            if ($env:EBC_DEBUG_LOG) { [Console]::Out.WriteLine(("DEBUG throw child exited {0} after {1:N2} s" -f $proc.ExitCode, $clock.Elapsed.TotalSeconds)) }
             $state = if (Test-Path -LiteralPath $throwOut) { (Get-Content -LiteralPath $throwOut -Raw).Trim() } else { 'no state file' }
             Assert-EbcTrue ($proc.ExitCode -ne 0 -and $state -eq 'running=False') ("child exited {0} after {1:N1} s; emulator after cleanup: {2}" -f $proc.ExitCode, $clock.Elapsed.TotalSeconds, $state)
         }
@@ -188,6 +200,7 @@ finally {
     # macOS the process exits even with the emulation thread still paused, so
     # the exit code alone cannot show a Stop that failed to release it.
     if ($ChildMode -eq 'ThrowWhilePaused' -and $OutFile) {
+        [EightBallChampMachine]::Dbg('PS outer finally: writing state running=' + [EightBallChampMachine]::IsRunning)
         Set-Content -LiteralPath $OutFile -Value ("running=" + [EightBallChampMachine]::IsRunning) -Encoding utf8
         Stop-EbcGame
     }

@@ -100,6 +100,23 @@ public static class EightBallChampMachine {
         {0x3f,'0'},{0x06,'1'},{0x5b,'2'},{0x4f,'3'},{0x66,'4'},{0x6d,'5'},{0x7d,'6'},{0x7c,'6'},
         {0x07,'7'},{0x7f,'8'},{0x6f,'9'},{0x67,'9'},{0x00,' '} };
 
+    // DEBUG (game-tests-debug): timestamped trace to $EBC_DEBUG_LOG, one line per call.
+    static readonly string dbgPath = Environment.GetEnvironmentVariable("EBC_DEBUG_LOG");
+    static readonly object dbgGate = new object();
+    public static void Dbg(string s) {
+        if (string.IsNullOrEmpty(dbgPath)) return;
+        try {
+            lock (dbgGate) File.AppendAllText(dbgPath, DateTime.UtcNow.ToString("HH:mm:ss.fff") + " pid=" + System.Diagnostics.Process.GetCurrentProcess().Id
+                + " tid=" + Thread.CurrentThread.ManagedThreadId + " " + s + Environment.NewLine);
+        } catch { }
+    }
+    static string Snap() {
+        int run = -1; try { run = libraryHandle != IntPtr.Zero ? PinmameIsRunning() : -2; } catch { }
+        return "frame=" + frame + " target=" + target + " state=" + state + " stopping=" + stopping + " stopped=" + stopped
+            + " faulted=" + faulted + " paused=" + paused.WaitOne(0) + " isRunning=" + run;
+    }
+    static int dispAfterStop;
+
     public static int Frame { get { return frame; } }
     public static int EventCount { get { lock (gate) return events.Count; } }
     public static string[] Logs { get { lock (gate) return logs.ToArray(); } }
@@ -133,7 +150,9 @@ public static class EightBallChampMachine {
         if (stopping || faulted) return;
         paused.Set();
         int guard = hangGuardSeconds;
-        if (!resume.WaitOne(TimeSpan.FromSeconds(guard))) {
+        bool got = resume.WaitOne(TimeSpan.FromSeconds(guard));
+        if (stopping) Dbg("Pause released while stopping, got=" + got + " " + Snap());
+        if (!got) {
             faultMessage = "hang guard: emulation thread paused " + guard + " s at frame " + frame + " without a resume; the machine is faulted";
             faulted = true;
             paused.Reset();
@@ -141,7 +160,7 @@ public static class EightBallChampMachine {
         }
     }
 
-    static void OnState(int s, IntPtr u) { try { state = s; Log("state=" + s); } catch (Exception e) { Fail("state", e); } }
+    static void OnState(int s, IntPtr u) { try { state = s; Log("state=" + s); Dbg("OnState " + s); } catch (Exception e) { Fail("state", e); } }
     static void OnAvail(int i, int n, IntPtr layout, IntPtr u) { try { if (i > lastDisplay) lastDisplay = i; } catch (Exception e) { Fail("avail", e); } }
     static void OnSol(IntPtr p, IntPtr u) { try { Ev("sol " + Marshal.ReadInt32(p, 0) + " " + Marshal.ReadInt32(p, 4)); } catch (Exception e) { Fail("sol", e); } }
     static int OnKey(int k, IntPtr u) { return 0; }
@@ -164,6 +183,7 @@ public static class EightBallChampMachine {
                 lock (gate) { string old; changed = !disp.TryGetValue(i, out old) || old != t; if (changed) disp[i] = t; }
                 if (changed) Ev("disp " + i + " " + t);
             }
+            if (stopping && i == lastDisplay && dispAfterStop++ < 3) Dbg("OnDisp after stop #" + dispAfterStop + " " + Snap());
             if (i != lastDisplay || stopping) return;
             // End of a whole update: lamps, then the pause point for this Frame.
             if (lampBuf == IntPtr.Zero) lampBuf = Marshal.AllocHGlobal(8 * Math.Max(PinmameGetMaxLamps(), 1));
@@ -210,19 +230,26 @@ public static class EightBallChampMachine {
         finally { Marshal.FreeHGlobal(cfg); }
         PinmameSetHandleKeyboard(0); PinmameSetHandleMechanics(0);
         // A process exiting on an unhandled error still releases the emulation thread.
-        AppDomain.CurrentDomain.ProcessExit += delegate { try { Stop(); } catch { } };
-
+        AppDomain.CurrentDomain.ProcessExit += delegate { Dbg("ProcessExit enter " + Snap()); try { Stop(); } catch (Exception ex) { Dbg("ProcessExit Stop threw " + ex.Message); } Dbg("ProcessExit leave " + Snap()); };
+        if (!string.IsNullOrEmpty(dbgPath)) {
+            var hb = new Thread(delegate () { while (true) { Thread.Sleep(2000); Dbg("hb " + Snap()); } });
+            hb.IsBackground = true; hb.Start();
+        }
+        Dbg("PinmameRun call");
         int rc = PinmameRun("eballchp");
+        Dbg("PinmameRun returned " + rc);
         if (rc != 0) throw new Exception("PinmameRun returned status " + rc);
         try {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (state != 1 && sw.Elapsed.TotalSeconds < 20) Thread.Sleep(5);
             if (state != 1) throw new TimeoutException("libpinmame did not reach the run state within 20 s (frame " + frame + ")");
             PinmameSetTimeFence(1.0); PinmameSetTimeFence(1.0e7);   // turns off real-time throttling
+            Dbg("Start waiting for frame 0 " + Snap());
             if (!paused.WaitOne(TimeSpan.FromSeconds(HangGuardSeconds)))
                 throw new TimeoutException("machine did not pause at frame 0 within " + HangGuardSeconds + " s (frame " + frame + ")");
         }
         catch { try { Stop(); } catch { } throw; }
+        Dbg("Start done " + Snap());
     }
 
     public static void Advance(int frames) {
@@ -290,14 +317,17 @@ public static class EightBallChampMachine {
     }
 
     public static void Stop() {
+        Dbg("Stop enter " + Snap());
         if (!booted || stopped) return;
         stopping = true;
         resume.Set();   // release a paused emulation thread before PinmameStop joins it
+        Dbg("Stop resume set");
         // PinmameStop joins the emulation thread with no timeout; bound it.
-        var t = new Thread(delegate () { try { PinmameStop(); } catch { } });
+        var t = new Thread(delegate () { Dbg("PinmameStop call"); try { PinmameStop(); } catch (Exception ex) { Dbg("PinmameStop threw " + ex.Message); } Dbg("PinmameStop returned " + Snap()); });
         t.IsBackground = true;
         t.Start();
         bool joined = t.Join(TimeSpan.FromSeconds(60));
+        Dbg("Stop joined=" + joined + " " + Snap());
         lock (gate) { closed = true; }
         stopped = true;
         if (!joined) throw new TimeoutException("PinmameStop did not return within 60 s (frame " + frame + ")");

@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     env:
-      LOOPS: '0'
+      LOOPS: '1'
     defaults:
       run:
         shell: pwsh

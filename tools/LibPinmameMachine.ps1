@@ -251,10 +251,13 @@ public static class EightBallChampMachine {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (state != 1 && sw.Elapsed.TotalSeconds < 20) Thread.Sleep(5);
             if (state != 1) throw new TimeoutException("libpinmame did not reach the run state within 20 s (frame " + frame + ")");
-            PinmameSetTimeFence(1.0); PinmameSetTimeFence(1.0e7);   // turns off real-time throttling
             Dbg("Start waiting for frame 0 " + Snap());
             if (!paused.WaitOne(TimeSpan.FromSeconds(HangGuardSeconds)))
                 throw new TimeoutException("machine did not pause at frame 0 within " + HangGuardSeconds + " s (frame " + frame + ")");
+            // Turns off real-time throttling. Only once paused at frame 0: libpinmame
+            // raises the run state before cpu_run resets the fence offset to
+            // -fence, and fences set before that reset freeze emulated time at 0.
+            PinmameSetTimeFence(1.0); PinmameSetTimeFence(1.0e7);
         }
         catch { try { Stop(); } catch { } throw; }
         Dbg("Start done " + Snap());
